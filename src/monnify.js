@@ -78,13 +78,6 @@ async function getAccessToken() {
   return login();
 }
 
-/**
- * Get the current bank directory from Monnify.
- *
- * Monnify publishes a supported-banks endpoint rather than requiring
- * the Android app to maintain a hard-coded list. This keeps new banks
- * and updated bank codes out of the APK release cycle.
- */
 async function getBanks() {
   const token = await getAccessToken();
 
@@ -109,67 +102,101 @@ async function getBanks() {
 
   const raw = body.responseBody;
 
-  if (Array.isArray(raw)) {
-    return raw;
-  }
-
-  if (Array.isArray(raw?.content)) {
-    return raw.content;
-  }
-
-  if (Array.isArray(raw?.banks)) {
-    return raw.banks;
-  }
+  if (Array.isArray(raw)) return raw;
+  if (Array.isArray(raw?.content)) return raw.content;
+  if (Array.isArray(raw?.banks)) return raw.banks;
 
   return [];
 }
 
+function shouldRetryValidation(status, responseCode, message) {
+  const text = String(message || "").toLowerCase();
+  return (
+    status >= 500 ||
+    responseCode === "SERVICE_UNAVAILABLE" ||
+    text.includes("temporarily unavailable") ||
+    text.includes("could not be validated") ||
+    text.includes("service unavailable")
+  );
+}
+
 /**
- * @param {string} accountNumber 10-digit NUBAN
- * @param {string} bankCode Monnify bank code
- * @returns {Promise<{ accountName: string, accountNumber: string, bankCode: string }>}
+ * Live Name Enquiry.
+ *
+ * The account number and bank code are sent directly to Monnify.
+ * Transient upstream failures are retried once so temporary bank
+ * availability problems do not immediately appear as invalid details.
  */
 async function validateBankAccount(accountNumber, bankCode) {
-  const token = await getAccessToken();
+  let lastError = null;
 
-  const url = new URL(`${BASE_URL}/api/v2/disbursements/account/validate`);
-  url.searchParams.set("accountNumber", accountNumber);
-  url.searchParams.set("bankCode", bankCode);
+  for (let attempt = 1; attempt <= 2; attempt += 1) {
+    try {
+      const token = await getAccessToken();
 
-  const res = await fetch(url.toString(), {
-    method: "GET",
-    headers: {
-      Authorization: `Bearer ${token}`,
-      Accept: "application/json",
-    },
-  });
+      const url = new URL(`${BASE_URL}/api/v2/disbursements/account/validate`);
+      url.searchParams.set("accountNumber", accountNumber);
+      url.searchParams.set("bankCode", bankCode);
 
-  const body = await res.json().catch(() => ({}));
+      const res = await fetch(url.toString(), {
+        method: "GET",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          Accept: "application/json",
+        },
+      });
 
-  if (!res.ok || !body.requestSuccessful) {
-    const err = new Error(
-      body.responseMessage || `Account validation failed (${res.status})`
-    );
-    err.code = "VALIDATE_FAILED";
-    err.status = res.status;
-    err.monnifyCode = body.responseCode;
-    throw err;
+      const body = await res.json().catch(() => ({}));
+      const responseMessage = String(body.responseMessage || "").trim();
+      const responseCode = String(body.responseCode || "").trim();
+
+      if (!res.ok || !body.requestSuccessful) {
+        const err = new Error(
+          responseMessage || `Account validation failed (${res.status})`
+        );
+        err.code = "VALIDATE_FAILED";
+        err.status = res.status;
+        err.monnifyCode = responseCode;
+        err.monnifyMessage = responseMessage;
+
+        lastError = err;
+
+        if (attempt < 2 && shouldRetryValidation(res.status, responseCode, responseMessage)) {
+          await new Promise((resolve) => setTimeout(resolve, 700));
+          continue;
+        }
+
+        throw err;
+      }
+
+      const rb = body.responseBody || {};
+      const accountName = String(rb.accountName || "").trim();
+
+      if (!accountName) {
+        const err = new Error("Account name not returned by Monnify");
+        err.code = "VALIDATE_FAILED";
+        err.status = res.status;
+        err.monnifyCode = responseCode;
+        err.monnifyMessage = responseMessage;
+        throw err;
+      }
+
+      return {
+        accountName,
+        accountNumber: String(rb.accountNumber || accountNumber),
+        bankCode: String(rb.bankCode || bankCode),
+        bankName: String(rb.bankName || "").trim(),
+        responseCode,
+      };
+    } catch (err) {
+      lastError = err;
+      if (attempt >= 2 || err.code === "MISSING_CREDENTIALS" || err.code === "LOGIN_FAILED") {
+        throw err;
+      }
+    }
   }
 
-  const rb = body.responseBody || {};
-  const accountName = String(rb.accountName || "").trim();
-
-  if (!accountName) {
-    const err = new Error("Account name not returned by Monnify");
-    err.code = "VALIDATE_FAILED";
-    throw err;
-  }
-
-  return {
-    accountName,
-    accountNumber: String(rb.accountNumber || accountNumber),
-    bankCode: String(rb.bankCode || bankCode),
-  };
+  throw lastError || new Error("Account validation failed");
 }
 
 module.exports = {
