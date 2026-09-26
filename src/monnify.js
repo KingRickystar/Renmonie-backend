@@ -65,7 +65,6 @@ async function login() {
     throw err;
   }
 
-  // Refresh 60s before expiry
   cachedToken = token;
   tokenExpiresAt = Date.now() + Math.max(60, expiresIn - 60) * 1000;
 
@@ -77,6 +76,52 @@ async function getAccessToken() {
     return cachedToken;
   }
   return login();
+}
+
+/**
+ * Get the current bank directory from Monnify.
+ *
+ * Monnify publishes a supported-banks endpoint rather than requiring
+ * the Android app to maintain a hard-coded list. This keeps new banks
+ * and updated bank codes out of the APK release cycle.
+ */
+async function getBanks() {
+  const token = await getAccessToken();
+
+  const res = await fetch(`${BASE_URL}/api/v1/banks`, {
+    method: "GET",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      Accept: "application/json",
+    },
+  });
+
+  const body = await res.json().catch(() => ({}));
+
+  if (!res.ok || !body.requestSuccessful) {
+    const err = new Error(
+      body.responseMessage || `Monnify bank list failed (${res.status})`
+    );
+    err.code = "BANK_LIST_FAILED";
+    err.status = res.status;
+    throw err;
+  }
+
+  const raw = body.responseBody;
+
+  if (Array.isArray(raw)) {
+    return raw;
+  }
+
+  if (Array.isArray(raw?.content)) {
+    return raw.content;
+  }
+
+  if (Array.isArray(raw?.banks)) {
+    return raw.banks;
+  }
+
+  return [];
 }
 
 /**
@@ -129,6 +174,7 @@ async function validateBankAccount(accountNumber, bankCode) {
 
 module.exports = {
   validateBankAccount,
+  getBanks,
   BASE_URL,
   MODE,
 };
