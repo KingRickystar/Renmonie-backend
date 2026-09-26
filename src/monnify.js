@@ -3,7 +3,7 @@
  * Credentials only from environment variables.
  */
 
-const MODE = (process.env.MONNIFY_MODE || "sandbox").toLowerCase();
+const MODE = (process.env.MONNIFY_MODE || "live").toLowerCase();
 
 const DEFAULT_BASE =
   MODE === "live"
